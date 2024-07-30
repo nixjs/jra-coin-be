@@ -2,7 +2,6 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import fetch from 'node-fetch'
 import { HttpClient, Api, Transaction as TonApiTransaction } from 'tonapi-sdk-js'
-import { Achievement } from './achievements'
 import { Address, Cell, TonClient4, Transaction, fromNano, TonClient, HttpApi } from '@ton/ton'
 import { AppDataSource } from './data-source'
 import { Executor } from './Executor'
@@ -14,25 +13,50 @@ import { Purchase } from './entity/Purchase'
 import { Balance } from './entity/Balance'
 import { Scheduler } from './Scheduler'
 import { User } from './entity/User'
-import { config } from './config'
+import { config } from './config/app'
 import { getHttpEndpoint, getHttpV4Endpoint } from '@orbs-network/ton-access'
 import { processTelegramData } from './telegram'
-import { z } from 'zod'
+import { string, z } from 'zod'
 import { toResponse } from './utils/reponse'
 import BigNumber from 'bignumber.js'
 import { ResponseData } from './types/reponse'
+import gameConfig, { baseInitBet } from './config/game'
+import { BetStatus, BetWin, DiceDirection, GameSymbol } from './enums/game'
+import { generateCommitHash, randomNumber } from './utils/randomize'
+import { Bet } from './entity/Bet'
+import { BetConfig } from './types/game'
+import { onGetMaxPayoutConfig, onPayout, onValidateBetAmount, onValidateBetNumber } from './utils/game/logic'
+import { BetResult } from './entity/BetResult'
+import { Transaction as ITransaction } from './entity/Transaction'
+import { TransactionStatus, TransactionType } from './enums/transaction'
 
 const PROCESS_INTERVAL = 10000
 const { NETWORK, TOKEN_MINTER, ACHIEVEMENT_COLLECTION, AMOUNT_CLAIMING_FEE, AMOUNT_CLAIMING_FREE, DECIMALS } = config
 
 const userRequest = z.object({
     tg_data: z.string(),
-    wallet: z.string().optional(),
 })
+
+const initRequest = z
+    .object({
+        wallet: z.string().optional(),
+    })
+    .merge(userRequest)
 
 const playedRequest = z
     .object({
         score: z.number().int(),
+        wallet: z.string().optional(),
+    })
+    .merge(userRequest)
+
+const placeBetRequest = z
+    .object({
+        betAmount: z.string(),
+        betNumber: z.number(),
+        currencySymbol: z.string(),
+        direction: z.number(),
+        turnId: z.string(),
     })
     .merge(userRequest)
 
@@ -40,6 +64,7 @@ const claimingRequest = z
     .object({
         hash: z.string(),
         msgHash: z.string().optional(),
+        wallet: z.string().optional(),
     })
     .merge(userRequest)
 
@@ -53,14 +78,6 @@ const tonApiHttpClient = new HttpClient({
     },
 })
 const tonApiClient = new Api(tonApiHttpClient)
-const endpoint = await (async () =>
-    await getHttpEndpoint({
-        network: NETWORK,
-    }))()
-
-const tonClient = new TonClient({
-    endpoint,
-})
 
 async function getTxById(hash: string) {
     try {
@@ -232,6 +249,51 @@ async function processTxs(
 async function main() {
     await AppDataSource.initialize()
 
+    async function adjustBalance(
+        userId: number,
+        currencySymbol: string,
+        total: string,
+        available: string,
+        debit: boolean
+    ): Promise<ResponseData<Balance>> {
+        let balanceInDb = await AppDataSource.getRepository(Balance).findOne({
+            where: {
+                userId,
+            },
+        })
+        if (!balanceInDb) return toResponse({ ok: false, error: 'insufficient account' })
+
+        let bTotal = BigNumber(balanceInDb.total)
+
+        if (debit) {
+            if (bTotal.isLessThan(total)) return toResponse({ ok: false, error: 'insufficient account' })
+        }
+
+        bTotal = debit ? bTotal.minus(total) : bTotal.plus(total)
+
+        const pTotal = bTotal.toFixed(DECIMALS)
+        await AppDataSource.getRepository(Balance).update(
+            { userId },
+            {
+                total: pTotal,
+                updatedAt: ~~(Date.now() / 1000),
+            }
+        )
+        const uBalance = await AppDataSource.getRepository(Balance).findOne({ where: { userId } })
+        if (uBalance) {
+            await AppDataSource.getRepository(ITransaction).create({
+                type: debit ? TransactionType.DEBIT : TransactionType.CREDIT,
+                userId,
+                amount: available,
+                currencySymbol,
+                status: TransactionStatus.SUCCESSFUL,
+            } as any)
+            return toResponse({ ok: true, result: uBalance })
+        }
+
+        return toResponse({ ok: false, error: 'insufficient account' })
+    }
+
     const highload = await createHighloadV2(config.MNEMONIC!)
 
     const sdk = await GameFiSDK.create({
@@ -394,16 +456,16 @@ async function main() {
     })
 
     fastify.post('/init', async function handler(request, _reply) {
-        const req = playedRequest.parse(request.body)
+        const { tg_data, wallet } = initRequest.parse(request.body)
 
         let reqWallet: Address | undefined = undefined
-        if (req.wallet !== undefined) {
+        if (wallet !== undefined) {
             try {
-                reqWallet = Address.parse(req.wallet)
+                reqWallet = Address.parse(wallet)
             } catch (e) {}
         }
 
-        const telegramData = processTelegramData(req.tg_data, config.TELEGRAM_BOT_TOKEN!)
+        const telegramData = processTelegramData(tg_data, config.TELEGRAM_BOT_TOKEN!)
 
         if (!telegramData.ok) return { ok: false }
 
@@ -449,6 +511,14 @@ async function main() {
                 ok: false,
                 error: 'wallet in valid',
             })
+        const endpoint = await (async () =>
+            await getHttpEndpoint({
+                network: NETWORK,
+            }))()
+
+        const tonClient = new TonClient({
+            endpoint,
+        })
         const reqWalletBalance = await tonClient.getBalance(reqWallet)
         const dReqWalletBalance = BigNumber(reqWalletBalance.toString())
         if (dReqWalletBalance.isNaN() || dReqWalletBalance.isLessThanOrEqualTo(AMOUNT_CLAIMING_FEE))
@@ -518,6 +588,7 @@ async function main() {
                         if (balance === null) {
                             if (reqWallet === undefined) return { ok: false }
                             const newUser = new Balance()
+                            newUser.userId = userId
                             newUser.total = config.AMOUNT_CLAIMING_FREE
                             await tx.save(newUser)
                             return { ok: true }
@@ -552,17 +623,9 @@ async function main() {
     })
 
     fastify.post('/balance', async function handler(request, _reply) {
-        const req = userRequest.parse(request.body)
+        const { tg_data } = userRequest.parse(request.body)
 
-        let reqWallet: Address | undefined = undefined
-        if (req.wallet !== undefined) {
-            try {
-                reqWallet = Address.parse(req.wallet)
-            } catch (e) {}
-        }
-
-        const telegramData = processTelegramData(req.tg_data, config.TELEGRAM_BOT_TOKEN!)
-
+        const telegramData = processTelegramData(tg_data, config.TELEGRAM_BOT_TOKEN!)
         if (!telegramData.ok) return { ok: false }
 
         const parsedUser = JSON.parse(telegramData.data.user)
@@ -576,46 +639,170 @@ async function main() {
         })
     })
 
+    fastify.get('/game-config', async function handler(_request, _reply) {
+        return toResponse({
+            ok: true,
+            result: gameConfig,
+        })
+    })
+
     fastify.post('/new-turn', async function handler(request, _reply) {
-        const req = playedRequest.parse(request.body)
+        const { tg_data } = userRequest.parse(request.body)
 
-        let reqWallet: Address | undefined = undefined
-        if (req.wallet !== undefined) {
-            try {
-                reqWallet = Address.parse(req.wallet)
-            } catch (e) {}
-        }
-
-        const telegramData = processTelegramData(req.tg_data, config.TELEGRAM_BOT_TOKEN!)
+        const telegramData = processTelegramData(tg_data, config.TELEGRAM_BOT_TOKEN!)
 
         if (!telegramData.ok) return { ok: false }
 
         const parsedUser = JSON.parse(telegramData.data.user)
         const userId: number = parsedUser.id
 
-        return { ok: true, claimed: config.AMOUNT_CLAIMING_FREE }
+        const bLatest = await AppDataSource.getRepository(Bet).findOne({
+            where: {
+                userId,
+                status: BetStatus.COMMITTED,
+            },
+            order: {
+                updatedAt: 'DESC',
+            },
+        })
+
+        if (bLatest && Object.keys(bLatest).length > 0) {
+            const latestTurnId = Object.keys(bLatest)[0]
+            if (latestTurnId && bLatest.status === BetStatus.COMMITTED && bLatest.commitHash && bLatest.maskedResult) {
+                return {
+                    turnId: latestTurnId,
+                    commitHashInfo: {
+                        commitHash: bLatest.commitHash,
+                        signature: bLatest.signature,
+                    },
+                }
+            }
+        }
+
+        const { minLuckyNumber, maxLuckyNumber, commitLength, commitPattern } = gameConfig
+        const luckyNumber = randomNumber(minLuckyNumber, maxLuckyNumber)
+        const { commitHash, maskedResult } = generateCommitHash(luckyNumber.toString(), commitLength, commitPattern)
+        const dBet = await AppDataSource.getRepository(Bet).create({
+            ...baseInitBet,
+            commitHash,
+            luckyNumber,
+            maskedResult,
+            status: BetStatus.COMMITTED,
+            displayName: userId,
+            userId,
+        } as any)
+        if (!dBet) return toResponse({ ok: false, error: 'Failed to create new turn' })
+        return toResponse({
+            ok: true,
+            result: { turnId: dBet, commitHashInfo: { commitHash } },
+        })
     })
 
     fastify.post('/place-bet', async function handler(request, _reply) {
-        const req = playedRequest.parse(request.body)
+        const { betAmount, betNumber, currencySymbol, direction, tg_data, turnId } = placeBetRequest.parse(request.body)
 
-        let reqWallet: Address | undefined = undefined
-        if (req.wallet !== undefined) {
-            try {
-                reqWallet = Address.parse(req.wallet)
-            } catch (e) {}
-        }
-
-        const telegramData = processTelegramData(req.tg_data, config.TELEGRAM_BOT_TOKEN!)
+        const telegramData = processTelegramData(tg_data, config.TELEGRAM_BOT_TOKEN!)
 
         if (!telegramData.ok) return { ok: false }
 
         const parsedUser = JSON.parse(telegramData.data.user)
-        const userId: number = parsedUser.id
+        const userId = parsedUser.id
 
-        return { ok: true, claimed: config.AMOUNT_CLAIMING_FREE }
+        if (!userId) return toResponse({ ok: false, result: 'User not found' })
+
+        if (!turnId || Number(turnId?.length) === 0) return toResponse({ ok: false, result: 'Turn id invalid' })
+
+        if (!betNumber) return toResponse({ ok: false, result: 'betNumber invalid' })
+
+        const turnInfo = await AppDataSource.getRepository(Bet).findOne({
+            where: {
+                turnId,
+            },
+        })
+        if (!turnInfo) return toResponse({ ok: false, result: 'Turn info invalid' })
+
+        const { betConfigs, rtp } = gameConfig
+
+        onValidateBetAmount(betAmount, currencySymbol, betConfigs)
+        onValidateBetNumber(Number(betNumber), direction, gameConfig)
+
+        const { luckyNumber, userId: dbUserId, createdAt, status } = turnInfo
+        if (userId !== dbUserId) return toResponse({ ok: false, result: 'User id invalid' })
+
+        if (status !== BetStatus.COMMITTED) return toResponse({ ok: false, result: 'Bet info invalid' })
+
+        // check balance
+        const balanceInDb = await AppDataSource.getRepository(Balance).findOne({
+            where: {
+                userId,
+            },
+        })
+        const availableInDb = BigNumber(balanceInDb?.total ?? '0')
+        if (availableInDb.isZero() || availableInDb.isLessThan(betAmount)) return toResponse({ ok: false, result: 'Insufficient balance' })
+
+        let isWin = false
+        let multiplier = null
+        let payout = '0'
+        let profit = '0'
+
+        if (direction === DiceDirection.ROLL_UNDER) {
+            if (luckyNumber < betNumber) {
+                isWin = true
+            }
+        } else if (direction === DiceDirection.ROLL_OVER) {
+            if (luckyNumber > betNumber) {
+                isWin = true
+            }
+        }
+
+        const maxPayoutConfig = onGetMaxPayoutConfig(currencySymbol, betConfigs) ?? '0'
+        const payoutCalculator = onPayout(betNumber, direction, betAmount, Number(rtp))
+        multiplier = payoutCalculator.multiplier
+        if (isWin) {
+            payout = BigNumber(payoutCalculator.payout).isLessThanOrEqualTo(maxPayoutConfig) ? payoutCalculator.payout : maxPayoutConfig
+            profit = BigNumber(payout).minus(betAmount).toFixed(DECIMALS) as string
+        }
+        // update balance
+        const totalAmount = isWin ? payout : betAmount
+        await adjustBalance(userId, currencySymbol, totalAmount, totalAmount, !isWin)
+
+        const dPlace = await AppDataSource.getRepository(Bet).update(
+            { turnId, createdAt },
+            {
+                userId,
+                displayName: '',
+                multiplier,
+                signature: '',
+                status: BetStatus.COMPLETED,
+                direction,
+                isWin: isWin ? BetWin.WIN : BetWin.LOSE,
+                luckyNumber,
+                betNumber,
+                betAmount,
+                payout,
+                profit,
+                updatedAt: ~~(Date.now() / 1000),
+            }
+        )
+        if (!dPlace) return toResponse({ ok: false, result: 'Failed to update' })
+        await AppDataSource.getRepository(BetResult).create({
+            turnId,
+            userId,
+            betAmount,
+            currencySymbol,
+            gameSymbol: GameSymbol.DICE,
+            isWin,
+            multiplier,
+            payout,
+            profit,
+        })
+
+        return toResponse({ ok: true, result: dPlace })
     })
 
+    /**
+     * @deprecated
+     */
     fastify.get('/purchases', async function handler(request, reply) {
         const telegramData = processTelegramData((request.query as any).auth, config.TELEGRAM_BOT_TOKEN!)
 

@@ -1,7 +1,7 @@
 import dotenv from 'dotenv'
 import { Address } from '@ton/core'
-import { Achievement } from './achievements'
-import { deployConfig, DeployConfig } from './deploy-config'
+import { Achievement } from '../achievements'
+import { deployConfig, DeployConfig } from '../deploy-config'
 
 dotenv.config()
 
@@ -36,3 +36,13 @@ export const config: Config = {
         'five-times': Address.parse(process.env.FIVE_TIMES_SBT_COLLECTION_ADDRESS),
     },
 }
+
+export const JETTON_CONTENT_TEMPLATE = {
+    uri: "https://github.com/ton-community/flappy-bird-server/",
+    name: "Flappy Jetton",
+    description: "A vibrant digital token from the Flappy Bird universe. Flappy Jetton is your gateway to exclusive in-game features and rewards.",
+    symbol: "FLAP",
+    decimals: 0,
+    amountStyle: "n",
+    renderType: "currency"
+  } as const;
