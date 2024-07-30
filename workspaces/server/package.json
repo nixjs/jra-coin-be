@@ -20,11 +20,13 @@
    },
    "dependencies": {
       "@fastify/cors": "8.4.1",
+      "@noble/hashes": "^1.4.0",
       "@orbs-network/ton-access": "2.3.3",
       "@ton-community/gamefi-sdk": "0.0.1",
       "@ton/core": "0.53.0",
       "@ton/crypto": "3.2.0",
       "@ton/ton": "13.9.0",
+      "bignumber.js": "^9.1.2",
       "dotenv": "16.3.1",
       "fastify": "4.22.2",
       "node-fetch": "2.7.0",
@@ -32,6 +34,7 @@
       "reflect-metadata": "0.1.13",
       "sqlite3": "5.1.6",
       "ton-crypto": "3.2.0",
+      "tonapi-sdk-js": "^1.0.15",
       "typeorm": "0.3.17",
       "zod": "3.22.4"
    }

@@ -130,7 +130,7 @@ initialize_env_file() {
     local NGROK_ENABLED="false"
     local NGROK_AUTHTOKEN=""
     local NGROK_DOMAIN=""
-    local API_URL="http://localhost:4000/api"
+    local API_URL="http://localhost:3000
 
     local TELEGRAM_BOT_TOKEN=$(read_input_and_validate "Enter TELEGRAM_BOT_TOKEN (e.g. 1234567890:ABCdefGHIjklMNoPQRsTUVwxyZ):" "" validate_telegram_bot_token)
     local MINI_APP_URL=$(read_input_and_validate "Enter MINI_APP_URL (e.g. https://t.me/mybot/myapp):" "" validate_telegram_url)

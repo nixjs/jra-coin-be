@@ -12,5 +12,5 @@
     },
     "include": [
         "src/**/*"
-    ]
+, "migrations/1722301078149-migrations.ts"    ]
 }

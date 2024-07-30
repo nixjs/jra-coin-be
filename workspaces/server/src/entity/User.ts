@@ -1,12 +1,11 @@
-import { Entity, Column, PrimaryColumn, OneToMany } from "typeorm"
-import { Purchase } from "./Purchase"
+import { Entity, Column, PrimaryColumn, OneToMany } from 'typeorm'
+import { Purchase } from './Purchase'
 
 @Entity()
 export class User {
-
     @PrimaryColumn({
         nullable: false,
-        type: 'bigint'
+        type: 'bigint',
     })
     id: number
 
@@ -24,11 +23,15 @@ export class User {
 
     @Column({
         default: 0,
+    })
+    isClaimed: number
+
+    @Column({
+        default: 0,
         nullable: false,
     })
     plays: number
 
-    @OneToMany(() => Purchase, purchase => purchase.user)
+    @OneToMany(() => Purchase, (purchase) => purchase.user)
     purchases: Purchase[]
-
 }

@@ -4,7 +4,7 @@ import { Purchase } from "./Purchase"
 @Entity()
 export class Item {
 
-    @PrimaryGeneratedColumn()
+    @PrimaryGeneratedColumn('uuid', { name: 'id' })
     id: number
 
     @Column({
