@@ -68,6 +68,11 @@ const claimingRequest = z
     })
     .merge(userRequest)
 
+const resultsRequest = z.object({
+    page: z.string(),
+    size: z.string(),
+})
+
 const tonApiHttpClient = new HttpClient({
     baseUrl: NETWORK === 'mainnet' ? 'https://tonapi.io' : 'https://testnet.tonapi.io',
     baseApiParams: {
@@ -634,6 +639,7 @@ async function main() {
         const balance = await AppDataSource.getRepository(Balance).findOneBy({ userId })
         if (!balance) return toResponse({ ok: false, error: 'balance not found' })
         const userInfo = await AppDataSource.getRepository(User).findOneBy({ id: userId })
+
         return toResponse({
             ok: true,
             result: { ...balance, claimed: !!userInfo?.isClaimed },
@@ -820,6 +826,18 @@ async function main() {
         return toResponse({
             ok: false,
             error: 'Failed to place bet',
+        })
+    })
+
+    fastify.get('/results', async function handler(request, _reply) {
+        const { page, size } = resultsRequest.parse(request.query)
+        const result = await AppDataSource.getRepository(BetResult).findAndCount({ take: Number(size), skip: Number(page) })
+        return toResponse({
+            ok: true,
+            result: {
+                data: result[0],
+                total: result[1],
+            },
         })
     })
 
