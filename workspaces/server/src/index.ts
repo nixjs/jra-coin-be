@@ -13,10 +13,10 @@ import { Purchase } from './entity/Purchase'
 import { Balance } from './entity/Balance'
 import { Scheduler } from './Scheduler'
 import { User } from './entity/User'
-import { config } from './config/app'
+import { config, JETTON_CONTENT_TEMPLATE } from './config/app'
 import { getHttpEndpoint, getHttpV4Endpoint } from '@orbs-network/ton-access'
 import { processTelegramData } from './telegram'
-import { string, z } from 'zod'
+import { boolean, string, z } from 'zod'
 import { toResponse } from './utils/reponse'
 import BigNumber from 'bignumber.js'
 import { ResponseData } from './types/reponse'
@@ -54,7 +54,7 @@ const placeBetRequest = z
     .object({
         betAmount: z.string(),
         betNumber: z.number(),
-        currencySymbol: z.string(),
+        // currencySymbol: z.string(),
         direction: z.number(),
         turnId: z.string(),
     })
@@ -633,9 +633,10 @@ async function main() {
 
         const balance = await AppDataSource.getRepository(Balance).findOneBy({ userId })
         if (!balance) return toResponse({ ok: false, error: 'balance not found' })
+        const userInfo = await AppDataSource.getRepository(User).findOneBy({ id: userId })
         return toResponse({
             ok: true,
-            result: balance,
+            result: { ...balance, claimed: !!userInfo?.isClaimed },
         })
     })
 
@@ -666,40 +667,40 @@ async function main() {
             },
         })
 
-        if (bLatest && Object.keys(bLatest).length > 0) {
-            const latestTurnId = Object.keys(bLatest)[0]
-            if (latestTurnId && bLatest.status === BetStatus.COMMITTED && bLatest.commitHash && bLatest.maskedResult) {
-                return {
-                    turnId: latestTurnId,
+        if (bLatest?.turnId && bLatest.status === BetStatus.COMMITTED && bLatest.commitHash && bLatest.maskedResult) {
+            return toResponse({
+                ok: true,
+                result: {
+                    turnId: bLatest?.turnId,
                     commitHashInfo: {
                         commitHash: bLatest.commitHash,
-                        signature: bLatest.signature,
                     },
-                }
-            }
+                },
+            })
         }
 
         const { minLuckyNumber, maxLuckyNumber, commitLength, commitPattern } = gameConfig
         const luckyNumber = randomNumber(minLuckyNumber, maxLuckyNumber)
         const { commitHash, maskedResult } = generateCommitHash(luckyNumber.toString(), commitLength, commitPattern)
-        const dBet = await AppDataSource.getRepository(Bet).create({
-            ...baseInitBet,
-            commitHash,
-            luckyNumber,
-            maskedResult,
-            status: BetStatus.COMMITTED,
-            displayName: userId,
-            userId,
-        } as any)
+        const betRepository = AppDataSource.getRepository(Bet)
+        const bet = new Bet()
+        bet.commitHash = commitHash
+        bet.luckyNumber = luckyNumber
+        bet.maskedResult = maskedResult
+        bet.status = BetStatus.COMMITTED
+        bet.userId = userId
+        const dBet = await betRepository.save(bet)
+
         if (!dBet) return toResponse({ ok: false, error: 'Failed to create new turn' })
         return toResponse({
             ok: true,
-            result: { turnId: dBet, commitHashInfo: { commitHash } },
+            result: { turnId: dBet.turnId, commitHashInfo: { commitHash } },
         })
     })
 
     fastify.post('/place-bet', async function handler(request, _reply) {
-        const { betAmount, betNumber, currencySymbol, direction, tg_data, turnId } = placeBetRequest.parse(request.body)
+        const { betAmount, betNumber, direction, tg_data, turnId } = placeBetRequest.parse(request.body)
+        const currencySymbol = JETTON_CONTENT_TEMPLATE.symbol
 
         const telegramData = processTelegramData(tg_data, config.TELEGRAM_BOT_TOKEN!)
 
@@ -766,13 +767,19 @@ async function main() {
         const totalAmount = isWin ? payout : betAmount
         await adjustBalance(userId, currencySymbol, totalAmount, totalAmount, !isWin)
 
-        const dPlace = await AppDataSource.getRepository(Bet).update(
-            { turnId, createdAt },
-            {
+        const betRepository = AppDataSource.getRepository(Bet)
+
+        const fBet = await betRepository.findOne({
+            where: {
+                turnId,
+                createdAt,
+            },
+        })
+        if (fBet) {
+            Object.assign(fBet, {
                 userId,
                 displayName: '',
                 multiplier,
-                signature: '',
                 status: BetStatus.COMPLETED,
                 direction,
                 isWin: isWin ? BetWin.WIN : BetWin.LOSE,
@@ -782,22 +789,38 @@ async function main() {
                 payout,
                 profit,
                 updatedAt: ~~(Date.now() / 1000),
-            }
-        )
-        if (!dPlace) return toResponse({ ok: false, result: 'Failed to update' })
-        await AppDataSource.getRepository(BetResult).create({
-            turnId,
-            userId,
-            betAmount,
-            currencySymbol,
-            gameSymbol: GameSymbol.DICE,
-            isWin,
-            multiplier,
-            payout,
-            profit,
-        })
+            })
+            await betRepository.save(fBet)
 
-        return toResponse({ ok: true, result: dPlace })
+            const betResultRepository = AppDataSource.getRepository(BetResult)
+            const betResult = new BetResult()
+            betResult.turnId = turnId
+            betResult.userId = userId
+            betResult.betAmount = betAmount
+            betResult.currencySymbol = currencySymbol
+            betResult.gameSymbol = GameSymbol.DICE
+            betResult.isWin = isWin
+            betResult.multiplier = multiplier
+            betResult.payout = payout
+            betResult.profit = profit
+            await betResultRepository.save(betResult)
+
+            const bResult = await betRepository.findOne({
+                where: {
+                    turnId,
+                    createdAt,
+                },
+            })
+
+            return toResponse({
+                ok: true,
+                result: bResult,
+            })
+        }
+        return toResponse({
+            ok: false,
+            error: 'Failed to place bet',
+        })
     })
 
     /**
